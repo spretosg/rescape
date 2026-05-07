@@ -1,0 +1,143 @@
+---
+title: "zone_cube_model"
+author: "spretosg"
+date: "2026-05-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+Following the steps provided by Szitar et al., 2024, the zone cube model uses ecological connectivity, ecosystem services and ecosystem condition as an input for the potential restoration zones in Trondheim area
+
+## Input data
+
+### Ecosystem services (Multifunctionality)
+Ecosystem service potential of ten different services has been mapped through PPGIS with N=7 environmental experts. As proposed by Szitar et al., 2024 only cultural and regulation services will be used as the level of provisioning services are determined mainly by human resource input rather than the characteristics of the actual ecosystem.
+
+
+### Biodiversity connectivity
+Ref (Roel)
+
+### Ecosystem condition
+Ref Philip Roche (INRAE)
+
+
+```{r}
+library(sf)
+library(dplyr)
+library(terra)
+library(ggplot2)
+```
+
+## loading and homogenizing raster input
+```{r}
+stud_area<-st_read("data/stud_site.gpkg")
+target_crs<-st_crs(stud_area)
+
+#raster
+ec<-terra::rast("data/ec.tif")
+crs(ec)
+con<-terra::rast("data/connectivity.tif")
+terra::crs(con) <- "EPSG:25832"
+con<-terra::project(con,crs(ec))
+
+spec<-terra::rast("data/spec_rich.tif")
+spec<-terra::project(spec,crs(ec))
+
+es_eco<-terra::rast("output/es/eco_mean.tif")
+es_cult<-terra::rast("output/es/cult_mean.tif")
+es_reg<-terra::rast("output/es/reg_mean.tif")
+es_prov<-terra::rast("output/es/prov_mean.tif")
+
+
+degrad<-terra::rast("data/degradation.tif")
+deg_trend<-terra::rast("data/deg_trend.tif")
+deg_trend<-round(deg_trend)
+
+
+```
+
+
+## Zone cube
+The zone cube consists of six zones.
+A) Ecosystem preservation with low connectivity values (PREV_lowC)
+B) Ecosystem preservation with high connectivity values (PREV_highC)
+
+C) Ecosystem enhancement with low connectivity values (ENH_lowC)
+
+D) Ecosystem enhancement with high connectivity values (ENH_highC)
+
+E) Ecosystem conservation zone (CONS)
+F) Not of interest (CONS)
+
+
+```{r}
+# Align to es_mean raster
+con <- resample(con, es_mean)
+ec <- resample(ec, es_mean)
+spec <- resample(spec, es_mean)
+es_material <- resample(es_material, es_mean)
+es_agri <- resample(es_agri, es_mean)
+
+degrad <- resample(degrad, es_mean)
+degrad <- round(degrad)
+deg_trend <- resample(deg_trend, es_mean, "min")
+deg_trend <- round(deg_trend)
+
+
+rcl <- matrix(c(
+  0,0,
+  4, 0,#stable
+  5,0,#increasing
+  1,1, #decling!!!
+  2,1, #early signs of decline!!
+  3,1, #stable but press!
+  6,0 #remove
+), ncol = 2, byrow = TRUE)
+
+deg_trend_recl <- classify(deg_trend, rcl)
+
+rcl2 <- matrix(c(
+  0,0,
+  -1, 1,#stable
+  1,0
+), ncol = 2, byrow = TRUE)
+deg_recl <- classify(degrad, rcl2)
+
+stack <- c(ec, con, es_mean,degrad,deg_trend)
+
+rescale_0_1 <- function(x) {
+  g <- terra::global(x, c("min", "max"), na.rm=TRUE)
+  
+  min_val <- g[1, "min"]
+  max_val <- g[1, "max"]
+  
+  if (is.na(min_val) || is.na(max_val) || max_val == min_val) {
+    return(x * 0 + 1)  # fallback if constant or invalid
+  }
+  
+  (x - min_val) / (max_val - min_val)
+}
+ecS <- rescale_0_1(ec)
+esS <- rescale_0_1(es_mean)
+conS <- rescale_0_1(con)
+specS <- rescale_0_1(spec)
+agricS <- rescale_0_1(es_agri )
+matS <- rescale_0_1(es_material )
+
+rest_pot<-ecS*esS*specS*conS
+rest_pot <- rescale_0_1(rest_pot)
+
+## conflicts rest with agri
+conflict_bin <- (matS > 0.5) & (rest_pot > 0.5)
+
+plot(rest_pot)
+writeRaster(rest_pot,"ec_es_spec_con.tif")
+
+
+zones <- round(zones)
+terra::plot(zones)
+
+```
+
