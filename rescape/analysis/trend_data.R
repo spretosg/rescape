@@ -1,6 +1,14 @@
 ## degradation
+library(terra)
 # using trend earth to calculate three sub indicators of degradation
 #trend raster from trend.earth
+rescale01 <- function(r) {
+
+  rmin <- global(r, "min", na.rm=TRUE)[1,1]
+  rmax <- global(r, "max", na.rm=TRUE)[1,1]
+
+  (r - rmin) / (rmax - rmin)
+}
 
 #a base raster
 r<-rast("data/es/cult/recr_mean.tif")
@@ -13,6 +21,7 @@ plot(trend_lulc)
 
 ## ev LULC transitions
 trans_lulc<-trend[[15]]
+
 trans_lulc <- resample(trans_lulc, r, "min")
 neg_trend<-c(12,13,6)
 trans_filtered <- ifel(trans_lulc %in% neg_trend, trans_lulc, 0)

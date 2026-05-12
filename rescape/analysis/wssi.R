@@ -4,12 +4,24 @@
 # Using ecosystem service rasters with terra
 
 library(terra)
+library(sf)
+
+rescale01 <- function(r) {
+
+  rmin <- global(r, "min", na.rm=TRUE)[1,1]
+  rmax <- global(r, "max", na.rm=TRUE)[1,1]
+
+  (r - rmin) / (rmax - rmin)
+}
 
 #-----------------------------------------------------------
 # 1. Load ecosystem service rasters (not include economic)
 #-----------------------------------------------------------
-
-
+trend<-terra::rast("output/composed_trend.tif")
+lulc<-terra::rast("data/lulc.tif")
+#lulc<-as.factor(lulc)
+lulc[lulc == 0] <- NA
+lulc <- trunc(lulc / 100)
 
 es_files <- c(
   "data/es/cult/aest_mean.tif",
@@ -24,7 +36,23 @@ es_files <- c(
   "data/es/eco/mat_mean.tif"
 )
 
+
+# es_files <- c(
+#   "output/es/cult_mean.tif",
+#   "output/es/prov_mean.tif",
+#   "output/es/reg_mean.tif"
+# )
+
 es <- rast(es_files)
+for(i in 1:nlyr(es)) {
+  r <- es[[i]]
+
+  mn <- global(r, min, na.rm=TRUE)[1,1]
+  mx <- global(r, max, na.rm=TRUE)[1,1]
+
+  es[[i]] <- (r - mn) / (mx - mn)
+}
+
 
 names(es) <- c(
   "aest",
@@ -38,6 +66,14 @@ names(es) <- c(
   "farm",
   "mat"
 )
+
+# names(es) <- c(
+#   "cult",
+#   "prov",
+#   "reg"
+# )
+
+
 
 #-----------------------------------------------------------
 # 2. Stakeholder weights
@@ -57,6 +93,11 @@ w <- c(
   mat = 0.11
 
 )
+# w <- c(
+#   cult  = 0.35,
+#   prov = 0.25,
+#   reg   = 0.4
+# )
 
 #-----------------------------------------------------------
 # 3. Weighted sum of ES supply
@@ -64,7 +105,8 @@ w <- c(
 
 weighted_es <- es * w
 
-weighted_sum <- app(weighted_es, sum, na.rm=TRUE)
+weighted_sum <- app(weighted_es, sum)
+plot(weighted_sum)
 writeRaster(weighted_sum,
             "output/es_sum_weighted.tif",
             overwrite=TRUE)
@@ -74,7 +116,7 @@ writeRaster(weighted_sum,
 # 4. Total ES supply per pixel
 #-----------------------------------------------------------
 
-total_es <- app(es, sum, na.rm=TRUE)
+total_es <- app(es, sum) ## !! if na.rm = T produces wrong total values!!
 
 # Avoid division by zero
 total_es[total_es == 0] <- NA
@@ -85,7 +127,7 @@ total_es[total_es == 0] <- NA
 #-----------------------------------------------------------
 
 es_prop <- es / total_es
-plot(es_prop)
+# plot(es_prop)
 #-----------------------------------------------------------
 # 6. Euclidean distance between:
 #    stakeholder demand weights
@@ -101,61 +143,125 @@ euclidean_fun <- function(x) {
   sqrt(sum((w-x)^2))
 }
 
-distance_raster <- app(es_prop, euclidean_fun)
+# dist_simple <- function(w,x) {
+#
+#   # x = proportional ES values for one pixel
+#   if(any(is.na(x))) return(NA)
+#
+#   sum(w - x)
+# }
 
+
+distance_raster <- app(es_prop, euclidean_fun)
+# f<-app(c(w,es_prop), dist_simple)
+# plot(distance_raster)
 #-----------------------------------------------------------
 # 7. Similarity index
 #    similarity = 1 - distance
 #-----------------------------------------------------------
 
 similarity <- 1 - distance_raster
-
+# dmax <- sqrt((1-0.25)^2 + 3*(0-0.25)^2)
+#
+# similarity <- 1 - (distance_raster / dmax)
 # Optional normalization to 0-1
 #similarity <- clamp(similarity, 0, 1)
-plot(similarity)
+# plot(similarity)
 #-----------------------------------------------------------
 # 8. Weighted Sum Similarity Index (WSSI)
 #-----------------------------------------------------------
 
 wssi <- weighted_sum * similarity
-
+wssi[wssi <= 0.01] <- NA
+plot(wssi)
 names(wssi) <- "WSSI"
 
-#-----------------------------------------------------------
-# 9. Identify reference sites
-#    Pixels above 95th percentile
-#-----------------------------------------------------------
-
-p95 <- global(wssi, quantile,
-              probs=0.95,
-              na.rm=TRUE)[1,1]
-
-reference_sites <- wssi >= p95
-plot(reference_sites)
-#-----------------------------------------------------------
-# 10. Mean WSSI of reference pixels
-#-----------------------------------------------------------
-
-reference_mean <- global(
-  mask(wssi, reference_sites),
-  mean,
-  na.rm=TRUE
-)
-
-print(reference_mean)
-
-#-----------------------------------------------------------
-# 11. Effectiveness
-#-----------------------------------------------------------
-rest_eff<- as.numeric(reference_mean[1,1])-wssi
-
-plot(rest_eff)
-#
 writeRaster(wssi,
             "output/wssi.tif",
             overwrite=TRUE)
 
-writeRaster(rest_eff,
-            "output/effectiveness.tif",
+## wssi per lulc
+lulc <- project(lulc, crs(wssi), method="near")
+wssi<-resample(wssi,lulc,"mean")
+lulc<-as.factor(lulc)
+
+
+# calculate 95th percentile per LULC class
+p95_by_class <- zonal(
+  wssi,
+  lulc,
+  fun = function(x, ...) {
+    quantile(x, probs = 0.95, na.rm = TRUE)
+  }
+)
+
+print(p95_by_class)
+
+# create empty raster
+reference_sites <- wssi
+values(reference_sites) <- NA
+
+# loop through classes
+for(i in 1:nrow(p95_by_class)) {
+
+  cls <- i
+  thr <- p95_by_class$WSSI[i]
+
+  mask <- lulc == cls & wssi >= thr
+
+  # keep original ec values only in mask
+  reference_sites[mask] <- wssi[mask]
+}
+
+plot(reference_sites)
+
+reference_mean <- zonal(
+  reference_sites,
+  lulc,
+  fun="mean",
+  na.rm=TRUE
+)
+
+
+
+rest_pot_es <- wssi
+values(rest_pot_es) <- NA
+
+# loop through classes
+for(i in 1:nrow(reference_mean)) {
+
+  cls <- i
+  ref_mean  <- reference_mean$WSSI[i]
+
+
+  # pixels belonging to this class
+  class_mask <- lulc == cls
+
+  # class-specific restoration potential
+  rest_pot_es[class_mask] <- ref_mean  - wssi[class_mask]
+}
+
+plot(rest_pot_es)
+
+writeRaster(rest_pot_es,
+            "output/es_status.tif",
             overwrite=TRUE)
+
+
+trend <- resample(trend, rest_pot_es, method="bilinear")
+
+trend <- crop(trend, rest_pot_es)
+
+rest_eff_es<-rest_pot_es* (-trend)
+
+
+plot(rest_eff_es)
+#
+
+
+writeRaster(rest_eff_es,
+            "output/es_effectiveness.tif",
+            overwrite=TRUE)
+
+
 
