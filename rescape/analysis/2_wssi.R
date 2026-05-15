@@ -5,19 +5,12 @@
 
 library(terra)
 library(sf)
+source("analysis/utils.R")
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
 
-rescale01 <- function(r) {
+####---- input data ----
+#load lulc and ES rasters
 
-  rmin <- global(r, "min", na.rm=TRUE)[1,1]
-  rmax <- global(r, "max", na.rm=TRUE)[1,1]
-
-  (r - rmin) / (rmax - rmin)
-}
-
-#-----------------------------------------------------------
-# 1. Load ecosystem service rasters (not include economic)
-#-----------------------------------------------------------
-trend<-terra::rast("output/composed_trend.tif")
 lulc<-terra::rast("data/lulc.tif")
 #lulc<-as.factor(lulc)
 lulc[lulc == 0] <- NA
@@ -35,13 +28,6 @@ es_files <- c(
   "data/es/eco/farm_mean.tif",
   "data/es/eco/mat_mean.tif"
 )
-
-
-# es_files <- c(
-#   "output/es/cult_mean.tif",
-#   "output/es/prov_mean.tif",
-#   "output/es/reg_mean.tif"
-# )
 
 es <- rast(es_files)
 for(i in 1:nlyr(es)) {
@@ -67,19 +53,7 @@ names(es) <- c(
   "mat"
 )
 
-# names(es) <- c(
-#   "cult",
-#   "prov",
-#   "reg"
-# )
-
-
-
-#-----------------------------------------------------------
-# 2. Stakeholder weights
-#    (must sum to 1)
-#-----------------------------------------------------------
-
+#stakeholder weights from AHP of PPGIS
 w <- c(
   aest  = 0.09,
   recr = 0.092,
@@ -93,27 +67,25 @@ w <- c(
   mat = 0.11
 
 )
-# w <- c(
-#   cult  = 0.35,
-#   prov = 0.25,
-#   reg   = 0.4
-# )
-
+####---- calculate WSSI ----
+# based on Silva et al. 2023 Prioritizing areas for ecological restoration: A participatory approach based on cost-effectiveness
 #-----------------------------------------------------------
-# 3. Weighted sum of ES supply
+#  Weighted sum of ES supply
 #-----------------------------------------------------------
 
 weighted_es <- es * w
 
 weighted_sum <- app(weighted_es, sum)
-plot(weighted_sum)
+# plot(weighted_sum)
+w_name <- paste0("output/wssi/es_sum_weighted_", timestamp, ".tif")
+
 writeRaster(weighted_sum,
-            "output/es_sum_weighted.tif",
+            w_name,
             overwrite=TRUE)
 
 
 #-----------------------------------------------------------
-# 4. Total ES supply per pixel
+# Total ES supply per pixel
 #-----------------------------------------------------------
 
 total_es <- app(es, sum) ## !! if na.rm = T produces wrong total values!!
@@ -122,53 +94,29 @@ total_es <- app(es, sum) ## !! if na.rm = T produces wrong total values!!
 total_es[total_es == 0] <- NA
 
 #-----------------------------------------------------------
-# 5. Relative proportion of each ES
+# Relative proportion of each ES
 #    ES'ij = ESij / totalESj
 #-----------------------------------------------------------
 
 es_prop <- es / total_es
-# plot(es_prop)
+
 #-----------------------------------------------------------
-# 6. Euclidean distance between:
+# Euclidean distance between:
 #    stakeholder demand weights
 #    vs actual ES proportions
 #-----------------------------------------------------------
 
-# Function applied pixel-wise
-euclidean_fun <- function(x) {
-
-  # x = proportional ES values for one pixel
-  if(any(is.na(x))) return(NA)
-
-  sqrt(sum((w-x)^2))
-}
-
-# dist_simple <- function(w,x) {
-#
-#   # x = proportional ES values for one pixel
-#   if(any(is.na(x))) return(NA)
-#
-#   sum(w - x)
-# }
-
-
 distance_raster <- app(es_prop, euclidean_fun)
-# f<-app(c(w,es_prop), dist_simple)
-# plot(distance_raster)
+
 #-----------------------------------------------------------
-# 7. Similarity index
+#  Similarity index
 #    similarity = 1 - distance
 #-----------------------------------------------------------
 
 similarity <- 1 - distance_raster
-# dmax <- sqrt((1-0.25)^2 + 3*(0-0.25)^2)
-#
-# similarity <- 1 - (distance_raster / dmax)
-# Optional normalization to 0-1
-#similarity <- clamp(similarity, 0, 1)
-# plot(similarity)
+
 #-----------------------------------------------------------
-# 8. Weighted Sum Similarity Index (WSSI)
+# Weighted Sum Similarity Index (WSSI)
 #-----------------------------------------------------------
 
 wssi <- weighted_sum * similarity
@@ -176,11 +124,17 @@ wssi[wssi <= 0.01] <- NA
 plot(wssi)
 names(wssi) <- "WSSI"
 
+wssi_name <- paste0("output/wssi/wssi_", timestamp, ".tif")
+
 writeRaster(wssi,
-            "output/wssi.tif",
+            wssi_name,
             overwrite=TRUE)
 
-## wssi per lulc
+#-----------------------------------------------------------
+# Deviance of WSSI from potential best areas per LULC
+# pot rest based on ES multifuctionality
+#-----------------------------------------------------------
+
 lulc <- project(lulc, crs(wssi), method="near")
 wssi<-resample(wssi,lulc,"mean")
 lulc<-as.factor(lulc)
@@ -223,7 +177,6 @@ reference_mean <- zonal(
 )
 
 
-
 rest_pot_es <- wssi
 values(rest_pot_es) <- NA
 
@@ -242,26 +195,26 @@ for(i in 1:nrow(reference_mean)) {
 }
 
 plot(rest_pot_es)
+es_pot_name <- paste0("output/wssi/pot_es_rest_", timestamp, ".tif")
+
 
 writeRaster(rest_pot_es,
-            "output/es_status.tif",
+            es_pot_name,
             overwrite=TRUE)
 
+#
+# trend <- resample(trend, rest_pot_es, method="bilinear")
+#
+# trend <- crop(trend, rest_pot_es)
+#
+# rest_eff_es<-rest_pot_es* (-trend)
 
-trend <- resample(trend, rest_pot_es, method="bilinear")
-
-trend <- crop(trend, rest_pot_es)
-
-rest_eff_es<-rest_pot_es* (-trend)
 
 
-plot(rest_eff_es)
 #
 
 
-writeRaster(rest_eff_es,
-            "output/es_effectiveness.tif",
-            overwrite=TRUE)
+
 
 
 
